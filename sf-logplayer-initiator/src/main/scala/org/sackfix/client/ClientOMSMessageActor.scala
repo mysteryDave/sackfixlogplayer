@@ -1,6 +1,7 @@
 package org.sackfix.client
 
-import java.time.{LocalDateTime, ZoneId}
+import java.nio.file.{Files, Path, Paths}
+import java.time.LocalDateTime
 
 import akka.actor.{Actor, ActorLogging, ActorRef, Props}
 import org.sackfix.boostrap._
@@ -25,6 +26,7 @@ object ClientOMSMessageActor {
 }
 
 class ClientOMSMessageActor extends Actor with ActorLogging {
+  private val REPLAY_LOG_FILENAME = "E:/replay_me.decoded"
   private val sentMessages = mutable.HashMap.empty[String, Long]
   private var orderId = 0
   private var isOpen = false
@@ -33,7 +35,7 @@ class ClientOMSMessageActor extends Actor with ActorLogging {
     case FixSessionOpen(sessionId: SfSessionId, sfSessionActor: ActorRef) =>
       log.info(s"Session ${sessionId.id} is OPEN for business")
       isOpen = true
-      sendANos(sfSessionActor)
+      playMessagesFromFile() //start replay
     case FixSessionClosed(sessionId: SfSessionId) =>
       // Anything not acked did not make it our to the TCP layer - even if acked, there is a risk
       // it was stuck in part or full in the send buffer.  So you should worry when sending fix
@@ -41,13 +43,7 @@ class ClientOMSMessageActor extends Actor with ActorLogging {
       log.info(s"Session ${sessionId.id} is CLOSED for business")
       isOpen = false
     case BusinessFixMessage(sessionId: SfSessionId, sfSessionActor: ActorRef, message: SfMessage) =>
-      // ignore duplicates...obviously you should check more than simply discarding.
-      if (!message.header.possDupFlagField.getOrElse(PossDupFlagField(false)).value) {
-        message.body match {
-          case m: ExecutionReportMessage => onExecutionReport(sfSessionActor, m)
-          case m@_ => log.warning(s"[${sessionId.id}] Received a message it cannot handle, MsgType=${message.body.msgType}")
-        }
-      }
+      onBusinessMessage(sfSessionActor, message)
     case BusinessFixMsgOutAck(sessionId: SfSessionId, sfSessionActor: ActorRef, correlationId: String) =>
       // You should have a HashMap of stuff you send, and when you get this remove from your set.
       // Read the Akka IO TCP guide for ACK'ed messages and you will see
@@ -58,22 +54,17 @@ class ClientOMSMessageActor extends Actor with ActorLogging {
   }
 
   /**
-    * @param fixSessionActor This will be a SfSessionActor, but sadly Actor ref's are not typed
-    *                        as yet
+    * @param fixSessionActor This will be a SfSessionActor, but sadly Actor ref's are not typed as yet
     */
-  def onExecutionReport(fixSessionActor: ActorRef, o: ExecutionReportMessage): Unit = {
-    val symbol = o.instrumentComponent.symbolField
-    val side = o.sideField
+  def onBusinessMessage(fixSessionActor: ActorRef, message: SfMessage): Unit = {
+    //We are a message pusher and don't care about or respond do incoming business messages.
+    log.info(s"Ignoring received message: ${message.toString}" )
+    playMessagesFromFile()
+  }
 
-    //    println(
-    //      s"""NewOrderSingle for
-    //      Instrument: ${symbol}
-    //      Side:       ${side}
-    //      Price:      ${o.priceField.foreach(_.value)}
-    //      clOrdId:    ${o.clOrdIDField.value}
-    //      """)
-
-    sendANos(fixSessionActor)
+  def playMessagesFromFile(): Unit = {
+    val path: Path = Paths.get(REPLAY_LOG_FILENAME)
+    Files.lines(path).forEach(line => log.info("Play message {}", line))
   }
 
   def sendANos(fixSessionActor: ActorRef): Unit = {
