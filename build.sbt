@@ -19,16 +19,16 @@ lazy val commonSettings = Seq(
 )
 
 
-lazy val sfexampleacceptor = (project in file("./sf-example-acceptor")).
+lazy val sflogplayeracceptor = (project in file("./sf-logplayer-acceptor")).
   settings(commonSettings: _*).
   settings(
-    name := "sf-example-acceptor"
+    name := "sf-logplayer-acceptor"
   )
 
-lazy val sfexampleinitiator = (project in file("./sf-example-initiator")).
+lazy val sflogplayerinitiator = (project in file("./sf-logplayer-initiator")).
   settings(commonSettings: _*).
   settings(
-    name := "sf-example-initiator"
+    name := "sf-logplayer-initiator"
   )
 
-lazy val sackfixexamples = (project in file(".")).aggregate(sfexampleacceptor, sfexampleinitiator)
+lazy val sackfixlogplayer = (project in file(".")).aggregate(sflogplayeracceptor, sflogplayerinitiator)
