@@ -1,47 +1,54 @@
 package org.sackfix.client
 
-import java.nio.file.{Files, Path, Paths}
 import java.time.LocalDateTime
 
 import akka.actor.{Actor, ActorLogging, ActorRef, Props}
 import org.sackfix.boostrap._
+import org.sackfix.codec.SfDecodeBytesToTuples
 import org.sackfix.common.message.{SfFixUtcTime, SfMessage}
 import org.sackfix.field._
 import org.sackfix.fix44._
 import org.sackfix.session.SfSessionId
 
 import scala.collection.mutable
+import scala.io.Source
 
 /**
-  * You must implement an actor for business messages.
-  * You should inject it into the SfInitiatorActor or SfAcceptorActor depending on
-  * if you are a server or a client
+  * This is a session agnostic actor (shouldn't care if it is a server or a client) and can be injected into either.
+  *
+  * Its purpose is to stream fix messages from a file log on to a fix session.
+  * This differs from the file store used as playback as the files read need to be human readable (to create test sets.)
+  * Ideally this will read from the file and send business messages according to the timestamps in the file.
   *
   * Backpressure is not implemented in SackFix for IO Buffer filling up on read or write.  If you want to
   * add it please feel free.  Note that you should probably NOT send out orders if you have ACKs outstanding.
   * This will pretty much avoid all back pressure issues. ie if sendMessages.size>1 wait
+  *
+  * In this case we can ignore above and leave it the responsibility of the log file supplier to ensure the messages are timed reasonably.
   */
 object ClientOMSMessageActor {
   def props(): Props = Props(new ClientOMSMessageActor)
 }
 
 class ClientOMSMessageActor extends Actor with ActorLogging {
-  private val REPLAY_LOG_FILENAME = "E:/replay_me.decoded"
+  private val REPLAY_LOG_FILENAME: String = "E:/replay_me.decoded"
   private val sentMessages = mutable.HashMap.empty[String, Long]
   private var orderId = 0
-  private var isOpen = false
+  private var isSessionOpen = false
+  private val decoder: SfDecodeBytesToTuples = new SfDecodeBytesToTuples(false)
+  private val fileIterator: Iterator[String] = Source.fromFile(REPLAY_LOG_FILENAME).getLines()  //eagerly instantiated. Maybe better lazily in case session never opens?
 
   override def receive: Receive = {
     case FixSessionOpen(sessionId: SfSessionId, sfSessionActor: ActorRef) =>
       log.info(s"Session ${sessionId.id} is OPEN for business")
-      isOpen = true
+      isSessionOpen = true
       playMessagesFromFile() //start replay
     case FixSessionClosed(sessionId: SfSessionId) =>
       // Anything not acked did not make it our to the TCP layer - even if acked, there is a risk
       // it was stuck in part or full in the send buffer.  So you should worry when sending fix
       // using any tech that the message never arrives.
       log.info(s"Session ${sessionId.id} is CLOSED for business")
-      isOpen = false
+      isSessionOpen = false
     case BusinessFixMessage(sessionId: SfSessionId, sfSessionActor: ActorRef, message: SfMessage) =>
       onBusinessMessage(sfSessionActor, message)
     case BusinessFixMsgOutAck(sessionId: SfSessionId, sfSessionActor: ActorRef, correlationId: String) =>
@@ -63,12 +70,11 @@ class ClientOMSMessageActor extends Actor with ActorLogging {
   }
 
   def playMessagesFromFile(): Unit = {
-    val path: Path = Paths.get(REPLAY_LOG_FILENAME)
-    Files.lines(path).forEach(line => log.info("Play message {}", line))
+    while(fileIterator.hasNext) log.info("Play message {}", fileIterator.next())
   }
 
   def sendANos(fixSessionActor: ActorRef): Unit = {
-    if (isOpen) {
+    if (isSessionOpen) {
       // validation etc..but send back the ack
       // NOTE, AKKA is Asynchronous.  You have ZERO idea if this send worked, or coincided with socket close down and so on.
       val correlationId = "NOS" + LocalDateTime.now.toString
