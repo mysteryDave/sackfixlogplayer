@@ -1,6 +1,6 @@
 package org.sackfix.client
 
-import java.time.LocalDateTime
+import java.time.{LocalDateTime, LocalTime}
 
 import akka.actor.{Actor, ActorLogging, ActorRef, Props}
 import org.sackfix.boostrap._
@@ -32,11 +32,15 @@ object ClientOMSMessageActor {
 
 class ClientOMSMessageActor extends Actor with ActorLogging {
   private val REPLAY_LOG_FILENAME: String = "E:/replay_me.decoded"
+  private val REPLAY_PRECISION_MILLIS: Int = 1000
+  private val decoder: SfDecodeBytesToTuples = new SfDecodeBytesToTuples(false)
+  private val fileIterator: Iterator[String] = Source.fromFile(REPLAY_LOG_FILENAME).getLines()  //eagerly instantiated. Maybe better lazily in case session never opens?
+
+  //Stateful
   private val sentMessages = mutable.HashMap.empty[String, Long]
   private var orderId = 0
   private var isSessionOpen = false
-  private val decoder: SfDecodeBytesToTuples = new SfDecodeBytesToTuples(false)
-  private val fileIterator: Iterator[String] = Source.fromFile(REPLAY_LOG_FILENAME).getLines()  //eagerly instantiated. Maybe better lazily in case session never opens?
+  private var queuedLogLine: Option[String] = Option.empty
 
   override def receive: Receive = {
     case FixSessionOpen(sessionId: SfSessionId, sfSessionActor: ActorRef) =>
@@ -70,7 +74,15 @@ class ClientOMSMessageActor extends Actor with ActorLogging {
   }
 
   def playMessagesFromFile(): Unit = {
-    while(fileIterator.hasNext) log.info("Play message {}", fileIterator.next())
+    if (queuedLogLine.isDefined) log.info("Play message from queue:{}", queuedLogLine.get)
+    while(fileIterator.hasNext) {
+      val logLine: String = fileIterator.next()
+      val lineElements: Array[String] = logLine.split(" ")
+      val logTime: LocalTime = LocalTime.parse(lineElements(0))
+      if (logTime.compareTo(LocalTime.now()) <= 0) log.info("PLAY NOW")
+      else log.info("PLAY LATER")
+      log.info("Play message from file: {}", logLine)
+    }
   }
 
   def sendANos(fixSessionActor: ActorRef): Unit = {
