@@ -32,7 +32,7 @@ object ClientOMSMessageActor {
 
 class ClientOMSMessageActor extends Actor with ActorLogging {
   private val REPLAY_LOG_FILENAME: String = "E:/replay_me.decoded"
-  private val REPLAY_PRECISION_MILLIS: Int = 1000
+  private val REPLAY_PRECISION_NANOS: Long = 1000000000
   private val decoder: SfDecodeBytesToTuples = new SfDecodeBytesToTuples(false)
   private val fileIterator: Iterator[String] = Source.fromFile(REPLAY_LOG_FILENAME).getLines()  //eagerly instantiated. Maybe better lazily in case session never opens?
 
@@ -46,7 +46,7 @@ class ClientOMSMessageActor extends Actor with ActorLogging {
     case FixSessionOpen(sessionId: SfSessionId, sfSessionActor: ActorRef) =>
       log.info(s"Session ${sessionId.id} is OPEN for business")
       isSessionOpen = true
-      playMessagesFromFile() //start replay
+      startPlayingFromFile() //start replay
     case FixSessionClosed(sessionId: SfSessionId) =>
       // Anything not acked did not make it our to the TCP layer - even if acked, there is a risk
       // it was stuck in part or full in the send buffer.  So you should worry when sending fix
@@ -70,19 +70,30 @@ class ClientOMSMessageActor extends Actor with ActorLogging {
   def onBusinessMessage(fixSessionActor: ActorRef, message: SfMessage): Unit = {
     //We are a message pusher and don't care about or respond do incoming business messages.
     log.info(s"Ignoring received message: ${message.toString}" )
-    playMessagesFromFile()
   }
 
-  def playMessagesFromFile(): Unit = {
-    if (queuedLogLine.isDefined) log.info("Play message from queue:{}", queuedLogLine.get)
-    while(fileIterator.hasNext) {
-      val logLine: String = fileIterator.next()
-      val lineElements: Array[String] = logLine.split(" ")
-      val logTime: LocalTime = LocalTime.parse(lineElements(0))
-      if (logTime.compareTo(LocalTime.now()) <= 0) log.info("PLAY NOW")
-      else log.info("PLAY LATER")
-      log.info("Play message from file: {}", logLine)
+  def logTimeInPast(logTime: String): Boolean = LocalTime.parse(logTime).compareTo(LocalTime.now().plusNanos(REPLAY_PRECISION_NANOS)) <= 0
+
+  def startPlayingFromFile(): Unit = {
+    //Can assume nothing enqueued
+    queuedLogLine = Option(fileIterator.next())
+    if (queuedLogLine.isDefined) {
+      var lineElements: Array[String] = queuedLogLine.get.split(" ")
+      while (fileIterator.hasNext && logTimeInPast(lineElements(0))) {
+        log.info("Play message from file:{}", queuedLogLine.get)
+        queuedLogLine = Option(fileIterator.next())
+        lineElements = queuedLogLine.get.split(" ")
+      }
+      //Two exit conditions !file.hasNext or queuedLine is for future.
+      if (fileIterator.hasNext) log.info("NO MORE MESSAGES TO PLAY. Queueing:{}", queuedLogLine.get)
+      else log.info("EOF - All messages from file have been (re)played.")
     }
+  }
+
+  def playMessagesFromQueue(): Unit = {
+    //can assume something enqueued
+    log.info("Play message from queue:{}", queuedLogLine.get)
+    startPlayingFromFile()
   }
 
   def sendANos(fixSessionActor: ActorRef): Unit = {
