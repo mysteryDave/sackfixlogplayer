@@ -22,7 +22,7 @@ class SfDecodeLogLineToMsg {
         case _    =>  Option.empty
       }
     }
-    else if (signalCount == 1 || signalCount == 3) Option(logChar)
+    else if (signalCount == 1 || signalCount == 4) Option(logChar)
     else Option.empty
   }
 

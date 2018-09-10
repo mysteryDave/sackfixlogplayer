@@ -4,10 +4,11 @@ import java.time.{LocalDateTime, LocalTime}
 
 import akka.actor.{Actor, ActorLogging, ActorRef, Props}
 import org.sackfix.boostrap._
-import org.sackfix.codec.SfDecodeBytesToTuples
+import org.sackfix.codec.{DecodingFailedData, SfDecodeTuplesToMsg}
 import org.sackfix.common.message.{SfFixUtcTime, SfMessage}
 import org.sackfix.field._
 import org.sackfix.fix44._
+import org.sackfix.logplayer.SfDecodeLogLineToMsg
 import org.sackfix.session.SfSessionId
 
 import scala.collection.mutable
@@ -33,7 +34,7 @@ object ClientOMSMessageActor {
 class ClientOMSMessageActor extends Actor with ActorLogging {
   private val REPLAY_LOG_FILENAME: String = "E:/replay_me.decoded"
   private val REPLAY_PRECISION_NANOS: Long = 1000000000
-  private val decoder: SfDecodeBytesToTuples = new SfDecodeBytesToTuples(false)
+  private val decoder: SfDecodeLogLineToMsg = new SfDecodeLogLineToMsg
   private val fileIterator: Iterator[String] = Source.fromFile(REPLAY_LOG_FILENAME).getLines()  //eagerly instantiated. Maybe better lazily in case session never opens?
 
   //Stateful
@@ -46,7 +47,7 @@ class ClientOMSMessageActor extends Actor with ActorLogging {
     case FixSessionOpen(sessionId: SfSessionId, sfSessionActor: ActorRef) =>
       log.info(s"Session ${sessionId.id} is OPEN for business")
       isSessionOpen = true
-      startPlayingFromFile() //start replay
+      startPlayingFromFile(sfSessionActor) //start replay
     case FixSessionClosed(sessionId: SfSessionId) =>
       // Anything not acked did not make it our to the TCP layer - even if acked, there is a risk
       // it was stuck in part or full in the send buffer.  So you should worry when sending fix
@@ -74,27 +75,51 @@ class ClientOMSMessageActor extends Actor with ActorLogging {
 
   def logTimeInPast(logTime: String): Boolean = LocalTime.parse(logTime).compareTo(LocalTime.now().plusNanos(REPLAY_PRECISION_NANOS)) <= 0
 
-  def startPlayingFromFile(): Unit = {
+  /**
+    * Reads fix messages from a verbose log file and pushes out messages on the fix session.
+    * @param fixSessionActor on which to send out the fix messages from the file
+    */
+  def startPlayingFromFile(fixSessionActor: ActorRef): Unit = {
     //Can assume nothing enqueued
     queuedLogLine = Option(fileIterator.next())
     if (queuedLogLine.isDefined) {
       var lineElements: Array[String] = queuedLogLine.get.split(" ")
-      while (fileIterator.hasNext && logTimeInPast(lineElements(0))) {
-        log.info("Play message from file:{}", queuedLogLine.get)
-        queuedLogLine = Option(fileIterator.next())
-        lineElements = queuedLogLine.get.split(" ")
+      while (fileIterator.hasNext && logTimeInPast(lineElements(0)) ) {
+        while ( fileIterator.hasNext && !lineElements(1).equals("OUT") && !lineElements(1).equals("IN")) {
+          queuedLogLine = Option(fileIterator.next())
+          lineElements = queuedLogLine.get.split(" ")
+        }
+        val fixString: String = queuedLogLine.get.substring(lineElements(0).length + lineElements(1).length + 2)
+          .toStream.map(c => decoder.translateLogChar(c))
+          .filter(c => c.isDefined)
+          .map(c => c.get)
+          .mkString + 1.toChar + '\n'
+
+        val message: Option[SfMessage] = SfDecodeTuplesToMsg.decodeFromStr(fixString, readLogFailed, Option.empty)
+        if (message.isDefined) {
+          log.info("Translated String:{}", fixString)
+          sentMessages(fixString) = System.nanoTime()
+          fixSessionActor ! BusinessFixMsgOut(message.get.body, fixString)
+        } else log.info("Could not process log line into message:{}", fixString)
+
+        do {
+          queuedLogLine = Option(fileIterator.next())
+          lineElements = queuedLogLine.get.split(" ")
+        } while(lineElements(1) != "IN" && lineElements(1) != "OUT")
       }
       //Two exit conditions !file.hasNext or queuedLine is for future.
       if (fileIterator.hasNext) log.info("NO MORE MESSAGES TO PLAY. Queueing:{}", queuedLogLine.get)
-      else log.info("EOF - All messages from file have been (re)played.")
+      else log.info("EOF - All messages from file have been (re)played. Last={}", queuedLogLine.get)
     }
   }
 
-  def playMessagesFromQueue(): Unit = {
+  def playMessagesFromQueue(fixSessionActor: ActorRef): Unit = {
     //can assume something enqueued
     log.info("Play message from queue:{}", queuedLogLine.get)
-    startPlayingFromFile()
+    startPlayingFromFile(fixSessionActor)
   }
+
+  val readLogFailed = {failData: DecodingFailedData => log.warning("Failed to decode a fix message from the log file: {}", failData) }
 
   def sendANos(fixSessionActor: ActorRef): Unit = {
     if (isSessionOpen) {
