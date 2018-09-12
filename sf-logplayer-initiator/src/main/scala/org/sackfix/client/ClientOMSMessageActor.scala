@@ -22,7 +22,6 @@ import scala.io.Source
   * add it please feel free.  Note that you should probably NOT send out orders if you have ACKs outstanding.
   * This will pretty much avoid all back pressure issues. ie if sendMessages.size>1 wait
   *
-  * In this case we can ignore above and leave it the responsibility of the log file supplier to ensure the messages are timed reasonably.
   */
 object ClientOMSMessageActor {
   def props(): Props = Props(new ClientOMSMessageActor)
@@ -32,7 +31,7 @@ class ClientOMSMessageActor extends Actor with ActorLogging {
   private val REPLAY_LOG_FILENAME: String = "C:/Users/DT/Documents/MSc/PROJECT/ScalaFIX/example.fix.txt"
   private val REPLAY_PRECISION_MILLIS: Long = 2000 //try to send within this range from recorded send time
   private val MAX_SEND_QUEUE_SIZE: Int = 1
-  private val IGNORE_MESSAGE_TYPES: Set[String] = Set("0", "1", "2", "3", "4", "A")
+  private val IGNORE_MESSAGE_TYPES: Set[String] = Set("0", "1", "2", "3", "4", "5", "A")
 
   private val fileIterator: Iterator[String] = Source.fromFile(REPLAY_LOG_FILENAME).getLines() //eagerly instantiated. Maybe better lazily in case session never opens?
 
