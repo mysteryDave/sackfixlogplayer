@@ -1,14 +1,11 @@
 package org.sackfix.client
 
-import java.time.{LocalDateTime, LocalTime}
+import java.time.{Instant, ZoneId}
 
 import akka.actor.{Actor, ActorLogging, ActorRef, Props}
 import org.sackfix.boostrap._
 import org.sackfix.codec.{DecodingFailedData, SfDecodeTuplesToMsg}
-import org.sackfix.common.message.{SfFixUtcTime, SfMessage}
-import org.sackfix.field._
-import org.sackfix.fix44._
-import org.sackfix.logplayer.SfDecodeLogLineToMsg
+import org.sackfix.common.message.SfMessage
 import org.sackfix.session.SfSessionId
 
 import scala.collection.mutable
@@ -32,110 +29,64 @@ object ClientOMSMessageActor {
 }
 
 class ClientOMSMessageActor extends Actor with ActorLogging {
-  private val REPLAY_LOG_FILENAME: String = "E:/replay_me.decoded"
-  private val REPLAY_PRECISION_NANOS: Long = 1000000000
-  private val decoder: SfDecodeLogLineToMsg = new SfDecodeLogLineToMsg
-  private val fileIterator: Iterator[String] = Source.fromFile(REPLAY_LOG_FILENAME).getLines()  //eagerly instantiated. Maybe better lazily in case session never opens?
+  private val REPLAY_LOG_FILENAME: String = "C:/Users/DT/Documents/MSc/PROJECT/ScalaFIX/example.fix.txt"
+  private val REPLAY_PRECISION_MILLIS: Long = 2000 //try to send within this range from recorded send time
+  private val MAX_SEND_QUEUE_SIZE: Int = 1
+  private val IGNORE_MESSAGE_TYPES: Set[String] = Set("0", "1", "2", "3", "4", "A")
+
+  private val fileIterator: Iterator[String] = Source.fromFile(REPLAY_LOG_FILENAME).getLines() //eagerly instantiated. Maybe better lazily in case session never opens?
 
   //Stateful
   private val sentMessages = mutable.HashMap.empty[String, Long]
   private var orderId = 0
   private var isSessionOpen = false
-  private var queuedLogLine: Option[String] = Option.empty
+  private var queuedMessage: Option[SfMessage] = Option.empty
+
 
   override def receive: Receive = {
     case FixSessionOpen(sessionId: SfSessionId, sfSessionActor: ActorRef) =>
       log.info(s"Session ${sessionId.id} is OPEN for business")
       isSessionOpen = true
-      startPlayingFromFile(sfSessionActor) //start replay
+      //start replay
+      readMessageFromFile()
+      playMessageFromFile(sfSessionActor)
     case FixSessionClosed(sessionId: SfSessionId) =>
       // Anything not acked did not make it our to the TCP layer - even if acked, there is a risk
       // it was stuck in part or full in the send buffer.  So you should worry when sending fix
       // using any tech that the message never arrives.
       log.info(s"Session ${sessionId.id} is CLOSED for business")
+      if (queuedMessage.isDefined) log.info("Unplayed logs beginning {}", queuedMessage.get)
       isSessionOpen = false
     case BusinessFixMessage(sessionId: SfSessionId, sfSessionActor: ActorRef, message: SfMessage) =>
-      onBusinessMessage(sfSessionActor, message)
+      log.info(s"Ignoring received message: ${message.toString}")
     case BusinessFixMsgOutAck(sessionId: SfSessionId, sfSessionActor: ActorRef, correlationId: String) =>
       // You should have a HashMap of stuff you send, and when you get this remove from your set.
       // Read the Akka IO TCP guide for ACK'ed messages and you will see
-      sentMessages.get(correlationId).foreach(tstamp =>
+      sentMessages.remove(correlationId).foreach(tstamp =>
         log.debug(s"$correlationId send duration = ${(System.nanoTime() - tstamp) / 1000} Micros"))
+      playMessageFromFile(sfSessionActor)
     case BusinessRejectMessage(sessionId: SfSessionId, sfSessionActor: ActorRef, message: SfMessage) =>
       log.warning(s"Session ${sessionId.id} has rejected the message ${message.toString()}")
   }
 
-  /**
-    * @param fixSessionActor This will be a SfSessionActor, but sadly Actor ref's are not typed as yet
-    */
-  def onBusinessMessage(fixSessionActor: ActorRef, message: SfMessage): Unit = {
-    //We are a message pusher and don't care about or respond do incoming business messages.
-    log.info(s"Ignoring received message: ${message.toString}" )
-  }
+  def logTimeInPast(message: SfMessage): Boolean = message.header.sendingTimeField.value.atZone(ZoneId.of("UTC")).toInstant.isBefore(Instant.now.plusMillis(REPLAY_PRECISION_MILLIS))
 
-  def logTimeInPast(logTime: String): Boolean = LocalTime.parse(logTime).compareTo(LocalTime.now().plusNanos(REPLAY_PRECISION_NANOS)) <= 0
+  def readMessageFromFile(): Unit = do {
+      val logLine: String = fileIterator.next
+      log.info("READ fix?{} '{}'", logLine.contains("8=FIX"), logLine)
+      queuedMessage = if (logLine.contains("8=FIX")) SfDecodeTuplesToMsg.decodeFromStr(logLine.substring(logLine.indexOf("8=FIX")), readLogFailed, Option.empty)
+      else Option.empty
+      if (queuedMessage.isDefined && IGNORE_MESSAGE_TYPES.contains(queuedMessage.get.body.msgType)) queuedMessage = Option.empty
+      log.info("READ MESSAGE empty?{}, next?{} '{}'", queuedMessage.isEmpty, fileIterator.hasNext, queuedMessage)
+    } while (queuedMessage.isEmpty && fileIterator.hasNext)
 
-  /**
-    * Reads fix messages from a verbose log file and pushes out messages on the fix session.
-    * @param fixSessionActor on which to send out the fix messages from the file
-    */
-  def startPlayingFromFile(fixSessionActor: ActorRef): Unit = {
-    //Can assume nothing enqueued
-    queuedLogLine = Option(fileIterator.next())
-    if (queuedLogLine.isDefined) {
-      var lineElements: Array[String] = queuedLogLine.get.split(" ")
-      while (fileIterator.hasNext && logTimeInPast(lineElements(0)) ) {
-        while ( fileIterator.hasNext && !lineElements(1).equals("OUT") && !lineElements(1).equals("IN")) {
-          queuedLogLine = Option(fileIterator.next())
-          lineElements = queuedLogLine.get.split(" ")
-        }
-        val fixString: String = queuedLogLine.get.substring(lineElements(0).length + lineElements(1).length + 2)
-          .toStream.map(c => decoder.translateLogChar(c))
-          .filter(c => c.isDefined)
-          .map(c => c.get)
-          .mkString + 1.toChar + '\n'
+  def readLogFailed: DecodingFailedData => Unit = { failData: DecodingFailedData => log.warning("Failed to decode a fix message from the log file: {}", failData) }
 
-        val message: Option[SfMessage] = SfDecodeTuplesToMsg.decodeFromStr(fixString, readLogFailed, Option.empty)
-        if (message.isDefined) {
-          log.info("Translated String:{}", fixString)
-          sentMessages(fixString) = System.nanoTime()
-          fixSessionActor ! BusinessFixMsgOut(message.get.body, fixString)
-        } else log.info("Could not process log line into message:{}", fixString)
-
-        do {
-          queuedLogLine = Option(fileIterator.next())
-          lineElements = queuedLogLine.get.split(" ")
-        } while(lineElements(1) != "IN" && lineElements(1) != "OUT")
-      }
-      //Two exit conditions !file.hasNext or queuedLine is for future.
-      if (fileIterator.hasNext) log.info("NO MORE MESSAGES TO PLAY. Queueing:{}", queuedLogLine.get)
-      else log.info("EOF - All messages from file have been (re)played. Last={}", queuedLogLine.get)
-    }
-  }
-
-  def playMessagesFromQueue(fixSessionActor: ActorRef): Unit = {
-    //can assume something enqueued
-    log.info("Play message from queue:{}", queuedLogLine.get)
-    startPlayingFromFile(fixSessionActor)
-  }
-
-  val readLogFailed = {failData: DecodingFailedData => log.warning("Failed to decode a fix message from the log file: {}", failData) }
-
-  def sendANos(fixSessionActor: ActorRef): Unit = {
-    if (isSessionOpen) {
-      // validation etc..but send back the ack
-      // NOTE, AKKA is Asynchronous.  You have ZERO idea if this send worked, or coincided with socket close down and so on.
-      val correlationId = "NOS" + LocalDateTime.now.toString
-      sentMessages(correlationId) = System.nanoTime()
-      orderId += 1
-      fixSessionActor ! BusinessFixMsgOut(NewOrderSingleMessage(clOrdIDField = ClOrdIDField(orderId.toString),
-        instrumentComponent = InstrumentComponent(symbolField = SymbolField("JPG.GB")),
-        sideField = SideField({
-          if (orderId % 2 == 0) SideField.Buy else SideField.Sell
-        }),
-        transactTimeField = TransactTimeField(SfFixUtcTime.now),
-        orderQtyDataComponent = OrderQtyDataComponent(orderQtyField = Some(OrderQtyField(100))),
-        ordTypeField = OrdTypeField(OrdTypeField.Market)), correlationId)
-    }
-  }
+  def playMessageFromFile(fixSessionActor: ActorRef): Unit = if (queuedMessage.isDefined && logTimeInPast(queuedMessage.get) && sentMessages.size < MAX_SEND_QUEUE_SIZE) {
+      log.info("Sending message from log: '{}'", queuedMessage.get)
+      sentMessages(queuedMessage.get.body.fixStr) = System.nanoTime()
+      fixSessionActor ! BusinessFixMsgOut(queuedMessage.get.body, queuedMessage.get.body.fixStr)
+      queuedMessage = Option.empty
+      readMessageFromFile()
+    } else if (queuedMessage.isDefined && !logTimeInPast(queuedMessage.get)) log.info("Play this one later: '{}'", queuedMessage.get)
 }
