@@ -1,6 +1,6 @@
 package org.sackfix.client
 
-import java.time.{LocalTime, ZoneId}
+import java.time.{LocalTime, ZoneId, ZonedDateTime}
 
 import akka.actor.{Actor, ActorLogging, ActorRef, Props}
 import org.sackfix.boostrap._
@@ -31,7 +31,7 @@ object ClientOMSMessageActor {
 
 class ClientOMSMessageActor extends Actor with ActorLogging {
   //private val REPLAY_LOG_FILENAME: String = "C:/Users/DT/Documents/MSc/PROJECT/ScalaFIX/example.fix.txt"
-  private val REPLAY_LOG_FILENAME: String = "/media/den/DenData/OLDEN/Den_old/Documents/David/Uni/Birkbeck/PROJECT/TestLogs/example.fix.log"
+  private val REPLAY_LOG_FILENAME: String = "E:/OLDEN/Den_old/Documents/David/Uni/Birkbeck/PROJECT/TestLogs/example.fix.log"
   private val REPLAY_PRECISION_SECONDS: Int = 10 //try to send within this range from recorded send time
   private val MAX_SEND_QUEUE_SIZE: Int = 1
   private val IGNORE_MESSAGE_TYPES: Set[String] = Set("0", "1", "2", "3", "4", "5", "A")
@@ -45,11 +45,10 @@ class ClientOMSMessageActor extends Actor with ActorLogging {
   private var queuedMessage: Option[SfMessage] = Option.empty
 
   class resumeReplayListener(logPlayer: ActorRef, sfSessionActor: ActorRef, resumeTime: LocalTime) extends SfHeartbeatListener {
-    override def heartBeatFired(): Unit = if (resumeTime.isBefore(LocalTime.now())) {
-      log.info("RESUME LOG PLAYER")
+    override def heartBeatFired(): Unit = if (ZonedDateTime.now.plusSeconds(REPLAY_PRECISION_SECONDS).withZoneSameInstant(ZoneId.of("UTC")).toLocalTime.isAfter(resumeTime)) {
       context.self ! RemoveListenerMsgIn(this)
       logPlayer ! ResumeLogPlay(sfSessionActor)
-    } else log.info("time now {} not yet next queued log message time {}", LocalTime.now(), resumeTime)
+    }
   }
 
   override def receive: Receive = {
@@ -78,23 +77,31 @@ class ClientOMSMessageActor extends Actor with ActorLogging {
       log.warning(s"Session ${sessionId.id} has rejected the message ${message.toString()}")
   }
 
-  def logReceive: Receive = { case ResumeLogPlay(sfSessionActor: ActorRef) => playMessageFromFile(sfSessionActor) }
+  def logReceive: Receive = {
+    case ResumeLogPlay(sfSessionActor: ActorRef) => {
+      log.info("Continue replay signal received in OMS Actor")
+      playMessageFromFile(sfSessionActor)
+    }
+  }
 
-  def logTimeInPast(message: SfMessage): Boolean = message.header.sendingTimeField.value.atZone(ZoneId.of("UTC")).toLocalTime.isBefore(LocalTime.now.plusSeconds(REPLAY_PRECISION_SECONDS))
+  def logTimeInPast(message: SfMessage): Boolean = {
+    log.debug("Checking historical send time {} against time now {}", message.header.sendingTimeField.value.atZone(ZoneId.of("UTC")).toLocalTime, ZonedDateTime.now.plusSeconds(REPLAY_PRECISION_SECONDS).withZoneSameInstant(ZoneId.of("UTC")).toLocalTime)
+    message.header.sendingTimeField.value.atZone(ZoneId.of("UTC")).toLocalTime.isBefore(ZonedDateTime.now.plusSeconds(REPLAY_PRECISION_SECONDS).withZoneSameInstant(ZoneId.of("UTC")).toLocalTime)
+  }
 
   def readMessageFromFile(): Unit = do {
-      val logLine: Option[String] = Option(fileIterator.next)
-      log.info("READ fix?{} '{}'", logLine.contains("8=FIX"), logLine)
+      val logLine: Option[String] = if (fileIterator.hasNext) Option(fileIterator.next) else Option.empty
+      log.debug("READ fix?{} '{}'", logLine.contains("8=FIX"), logLine)
       queuedMessage = if (logLine.isDefined && logLine.get.contains("8=FIX")) SfDecodeTuplesToMsg.decodeFromStr(logLine.get.substring(logLine.get.indexOf("8=FIX")), readLogFailed, Option.empty)
       else Option.empty
       if (queuedMessage.isDefined && IGNORE_MESSAGE_TYPES.contains(queuedMessage.get.body.msgType)) queuedMessage = Option.empty
-      log.info("READ MESSAGE empty?{}, next?{} '{}'", queuedMessage.isEmpty, fileIterator.hasNext, queuedMessage)
+      log.debug("READ MESSAGE empty?{}, next?{} '{}'", queuedMessage.isEmpty, fileIterator.hasNext, queuedMessage)
     } while (queuedMessage.isEmpty && fileIterator.hasNext)
 
   def readLogFailed: DecodingFailedData => Unit = { failData: DecodingFailedData => log.warning("Failed to decode a fix message from the log file: {}", failData) }
 
   def playMessageFromFile(fixSessionActor: ActorRef): Unit = if (queuedMessage.isDefined && logTimeInPast(queuedMessage.get) && sentMessages.size < MAX_SEND_QUEUE_SIZE) {
-      log.info("Sending message from log: '{}'", queuedMessage.get)
+      log.debug("Sending message from log: '{}'", queuedMessage.get)
       sentMessages(queuedMessage.get.body.fixStr) = System.nanoTime()
       fixSessionActor ! BusinessFixMsgOut(queuedMessage.get.body, queuedMessage.get.body.fixStr)
       queuedMessage = Option.empty
@@ -102,6 +109,7 @@ class ClientOMSMessageActor extends Actor with ActorLogging {
     } else if (queuedMessage.isDefined && !logTimeInPast(queuedMessage.get)) {
       log.info("Play this one later: '{}'", queuedMessage.get)
       val resumeListener = new resumeReplayListener(context.self, fixSessionActor, queuedMessage.get.header.sendingTimeField.value.atZone(ZoneId.of("UTC")).toLocalTime.plusSeconds(REPLAY_PRECISION_SECONDS))
+      log.debug("Sending message to actor with path '{}'", context.parent.path + "/heartbeater")
       context.actorSelection(context.parent.path + "/heartbeater") ! AddListenerMsgIn(resumeListener)
     }
 }

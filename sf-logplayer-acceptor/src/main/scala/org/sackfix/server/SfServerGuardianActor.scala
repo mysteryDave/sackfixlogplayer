@@ -2,7 +2,7 @@ package org.sackfix.server
 
 import akka.actor.SupervisorStrategy.{Restart, Stop}
 import akka.actor.{Actor, ActorInitializationException, ActorKilledException, ActorLogging, DeathPactException, OneForOneStrategy, Props}
-import org.sackfix.boostrap.{BusinessCommsHandler, BusinessFixMessage, SfBusinessFixInfo, SystemErrorNeedsDevOpsMsg}
+import org.sackfix.boostrap.{BusinessCommsHandler, SfBusinessFixInfo, SystemErrorNeedsDevOpsMsg}
 import org.sackfix.boostrap.acceptor._
 import org.sackfix.server.SfServerGuardianActor._
 import org.sackfix.session.filebasedstore.SfFileMessageStore
