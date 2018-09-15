@@ -18,7 +18,6 @@ lazy val commonSettings = Seq(
   libraryDependencies += "org.mockito" % "mockito-all" % "1.10.19" % "test"
 )
 
-
 lazy val sflogplayeracceptor = (project in file("./sf-logplayer-acceptor")).
   settings(commonSettings: _*).
   settings(

@@ -56,7 +56,7 @@ class SfClientGuardianActor extends Actor with ActorLogging {
       // ***** THE IMPORTANT BIT!  Put your logic in the MessageActor *****
       // After session valdation etc all business messages are sent to this actor
       // ******************************************************************
-      val businessCommsActor = context.actorOf(ClientOMSMessageActor.props(), name="OMSClientMsgHandler")
+      val businessCommsActor = context.actorOf(LogPlayerActor.props(), name="LogPlayer")
       val businessComms = new BusinessCommsHandler{
         override def handleFix(msg: SfBusinessFixInfo): Unit = {
           businessCommsActor ! msg

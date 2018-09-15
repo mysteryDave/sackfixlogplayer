@@ -4,13 +4,14 @@
 ## What is this project?
 An extension to the Panda Red's SackFix project(s)
 
-Built on the SackFix project, this is a log player that reads from (human readable) logs and plays messages into a FIX session.
+Built on the SackFix project, this is a log player that reads from .fix.log files such as those produced by SackFix and plays messages into a FIX session.
 Great for testing specific FIX or trading system functionality or for stress testing.
 Logs are human readable can be constructed using scripts from other logs or even using Excel.
+The log files should contain a single valid FIX message per line serialised in <tagnumber>=<tagvalue> key-value pairs separated by SOH characters.
 
 To get started download:
 * [LogPlayer](https://github.com/mysteryDave/sackfixlogplayer)
-You will first need to compile and publishLocal these updated versions of SackFix, as these versions are not published anywhere:
+To build you will first need to compile and publishLocal these updated versions of SackFix, as these versions are only published on github.
 * [Session](https://github.com/mysteryDave/sackfixsessions): All of the statemachines and message handling for the Fix Session.  ie the business logic lives here.
 * [Messages](https://github.com/mysteryDave/sackfixmessages): Code generated Fix Messages for all versions of fix.
 * [Common](https://github.com/mysteryDave/sackfix): The code generator and common classes - including all the code generated Fields.
