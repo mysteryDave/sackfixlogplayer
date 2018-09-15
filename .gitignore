@@ -1,4 +1,5 @@
 /target
+/project/project/target
 /project/target
 /.idea
 /logs/
@@ -6,3 +7,4 @@
 */target
 */logs
 */.idea
+E:/
